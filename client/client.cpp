@@ -30,7 +30,7 @@ BOOL WINAPI ConsoleHandler(DWORD event)
         if (clientSocket != INVALID_SOCKET)
         {
             std::string exitMsg = "/exit";
-            send(clientSocket, exitMsg.c_str(), ((int)exitMsg.size(), 0);
+            send(clientSocket, exitMsg.c_str(), (int)exitMsg.size(), 0);
             shutdown(clientSocket, SD_BOTH);
         }
 
