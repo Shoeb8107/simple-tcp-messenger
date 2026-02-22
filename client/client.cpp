@@ -3,11 +3,9 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <chrono>
 #include <thread>
 #include <atomic>
-#include <signal.h>
-#include <cstdio>
+#include <string>
 #include <iostream>
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -15,126 +13,143 @@
 
 namespace
 {
-    std::chrono::seconds timespan(1);
     constexpr int buffer_size = 512;
     std::atomic<bool> running{ false };
     SOCKET clientSocket = INVALID_SOCKET;
 }
 
-// User can exit using CTRL+C
-void handleExit(int signal)
+BOOL WINAPI ConsoleHandler(DWORD event)
 {
-    running = false;
-    return;
-}
-
-void sendMessage(SOCKET clientSocket)
-{
-    while (running)
+    switch (event)
     {
-        std::cout << "You: ";
-        char msg[buffer_size];
-        std::cin.getline(msg, buffer_size);
-        if (std::cin.fail() || running == false) { break; }
-        send(clientSocket, msg, strlen(msg), 0);
-        if (strstr(msg, "/exit"))
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+        std::cout << "\nDisonncting..." << std::endl;
+
+        if (clientSocket != INVALID_SOCKET)
         {
-            running = false;
-            // we need to handle the exit gracefully here. Maybe use the handleExit()?
+            std::string exitMsg = "/exit";
+            send(clientSocket, exitMsg.c_str(), ((int)exitMsg.size(), 0);
+            shutdown(clientSocket, SD_BOTH);
         }
 
+        running = false;
+        Sleep(500);
+        return TRUE;
+    default:
+        return FALSE;
     }
 }
 
-void recieveMessage(SOCKET clientSocket)
+void sendMessage()
+{
+    std::string input;
+    while (running)
+    {
+        std::getline(std::cin, input);
+        if (!running || std::cin.fail()) break;
+        if (input.empty()) continue;
+
+        send(clientSocket, input.c_str(), (int)input.size(), 0);
+
+        if (input == "/exit")
+        {
+            std::cout << "Disconnecting..." << std::endl;
+            running = false;
+            break;
+        }
+    }
+}
+
+
+void receiveMessage()
 {
     char buf[buffer_size];
     while (running)
     {
-        int recv_result = recv(clientSocket, buf, buffer_size-1, 0);
-        if (recv_result > 0)
+        int bytedReceived = recv(clientSocket, buf, buffer_size - 1, 0);
+        if (bytedReceived > 0)
         {
-            buf[recv_result] = '\0';
-            std::cout << "Message received: " << buf << std::endl;
-        }
-        else if (recv_result == 0)
-        {
-            std::cout << "Connection closed!" << std::endl;
-            running = false;
-            break;
-
+            buf[bytedReceived] = '\0';
+            std::cout << buf;
+            // Reprint the prompt after incoming message
+            fflush(stdout);
         }
         else
         {
-            std::cerr << "Attempting to receive message failed: " << WSAGetLastError() << std::endl;
+            if (running)
+            {
+                if (bytedReceived == 0)
+                {
+                    std::cout << "\n[Disconnected from server]" << std::endl;
+                }
+                else
+                {
+                    std::cerr << "\n[Connection error: " << WSAGetLastError() << "]" << std::endl;
+                }
+            }
             running = false;
             break;
-            // Might also need an fflush(stdout)
         }
-        fflush(stdout);
     }
 }
 
 int main()
 {
-    // Initialize WinSock
     WSADATA wsaData;
-    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-
-    if (result != 0)
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
     {
-        std::cerr << "WSAStartup Failed: " << result << std::endl;
+        std::cerr << "WSAStartup Failed" << std::endl;
         return 1;
     }
-    std::cout << "Winsock startup successful!" << std::endl;
 
-    // Create a TCP Socket
-    int iFamily = AF_INET;
-    int iType = SOCK_STREAM;
-    int iProtocol = IPPROTO_TCP;
-
-    clientSocket = socket(iFamily, iType, iProtocol);
+    clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (clientSocket == INVALID_SOCKET)
     {
         std::cerr << "Socket function called with error: " << WSAGetLastError() << std::endl;
         WSACleanup();
         return 1;
     }
-    std::this_thread::sleep_for(timespan);
-    std::cout << "Socket function succeeded!" << std::endl;
 
-    sockaddr_in clientService;
-    clientService.sin_family = AF_INET;
-    clientService.sin_addr.S_un.S_addr = inet_addr("127.0.0.1");
-    clientService.sin_port = htons(55555);
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.S_un.S_addr = inet_addr("127.0.0.1");
+    serverAddr.sin_port = htons(55555);
 
-    int connect_result = connect(clientSocket, (SOCKADDR*)&clientService, sizeof clientService);
-    if (connect_result == SOCKET_ERROR)
+    if(connect(clientSocket, (SOCKADDR*)&serverAddr, sizeof serverAddr) == SOCKET_ERROR)
     {
         std::cerr << "Connection to host failed: " << WSAGetLastError() << std::endl;
+        closesocket(clientSocket);
         WSACleanup();
         return 1;
     }
-    running = true;
     std::cout << "Connected to host!" << std::endl;
-    // Think about SetConsoleCtrlHandler() instead of signal()
-    signal(SIGINT, handleExit);
+    running = true;
 
-    // Enter name
-    char name[buffer_size];
+    // Register the console control handler
+    SetConsoleCtrlHandler(ConsoleHandler, TRUE);
+
+    // Send the client username as the first message
+    std::string name;
     std::cout << "Enter your username: ";
-    std::cin.getline(name, buffer_size);
-    send(clientSocket, name, sizeof(name), 0);
+    std::getline(std::cin, name);
+    send(clientSocket, name.c_str(), (int)name.size(), 0);
+
+    std::cout << "\n=== Chat started. Commands: ===" << std::endl;
+    std::cout << "   /w [user] [msg]   - Whisper" << std::endl;
+    std::cout << "   /exit             - Disconnect\n" << std::endl;
+
 
     //Create separate threads for sending and recieving messages
-    std::thread sendThread(sendMessage, clientSocket);
-    std::thread recieveThread(recieveMessage, clientSocket);
+    std::thread sendThread(sendMessage);
+    std::thread receiveThread(receiveMessage);
 
     if (sendThread.joinable()) sendThread.join();
     shutdown(clientSocket, SD_BOTH);
-    if (recieveThread.joinable()) recieveThread.join();
+    if (receiveThread.joinable()) receiveThread.join();
 
     closesocket(clientSocket);
     WSACleanup();
-
+    return 0;
 }

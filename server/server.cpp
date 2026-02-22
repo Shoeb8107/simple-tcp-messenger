@@ -6,6 +6,7 @@
 #include <thread>
 #include <mutex>
 #include <vector>
+#include <string>
 #include <iostream>
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -14,8 +15,9 @@
 namespace
 {
     constexpr int buffer_size = 512;
+    constexpr int maxClients = 5;
     std::mutex clientsMutex;
-    UINT clientID = 0;
+    UINT nextClientID = 0;
 }
 
 struct clientInfo
@@ -24,62 +26,216 @@ struct clientInfo
     std::string name;
     SOCKET clientSocket;
     std::thread clientThread;
+    bool connected;
 };
-std::vector<clientInfo> clients;
 
-void setClientName(UINT clientID, char name[])
+
+std::vector<clientInfo*> clients;
+
+// send a string to a socket
+bool sendToSocket(SOCKET s, const std::string& msg)
 {
-    for (int i = 0; i < clients.size(); ++i)
+    int sent = send(s, msg.c_str(), static_cast<int>(msg.size()), 0);
+    return sent != SOCKET_ERROR;
+}
+
+// broadcast message to all connected clients
+void broadcastMessage(const std::string& msg, UINT excludeID = 0)
+{
+    std::lock_guard<std::mutex> lock(clientsMutex);
+    for (auto* client : clients)
     {
-        if (clients[i].clientID == clientID)
+        if (client->connected && client->clientID != excludeID)
         {
-            clients[i].name = std::string(name);
+            sendToSocket(client->clientSocket, msg);
         }
     }
 }
 
-void clientHandler(SOCKET clientSocket, UINT clientID)
+// Find client by the name
+clientInfo* findClientByName(const std::string& clientName)
 {
-    char name[buffer_size];
-    char msg[buffer_size];
-    recv(clientSocket, name, strlen(name), 0);
-    setClientName(clientID, name);
+    for (auto* client : clients)
+    {
+        if (client->name == clientName)
+        {
+            return client;
+        }
+    }
+    return nullptr;
+}
 
-    std::cout << "Welcome "<< name << " !" << std::endl;
-    // Send some data to client
-    //const char* buf = "Hello from Server!";
-    //int sentData = send(clientSocket, buf, strlen(buf), 0);
-    //if (sentData == SOCKET_ERROR)
-    //{
-    //    std::cerr << "Failed to send message to client: " << WSAGetLastError() << std::endl;
-    //    return;
+// Remove a client by ID
+void removeClient(UINT clientID)
+{
+    std::lock_guard<std::mutex> lock(clientsMutex);
 
-    //}
-    //std::cout << "Message sent!" << std::endl;
+    clients.erase(std::remove_if(
+        clients.begin(),
+        clients.end(),
+        [clientID](clientInfo* client) { return client->clientID == clientID; }),
+        clients.end()
+    );
+}
 
-
-
-
-    // Keep listening for client response
+void clientHandler(clientInfo* client)
+{
     char recvbuf[buffer_size];
+
+    // Recieve the clients chosen name
+    int nameBytes = recv(client->clientSocket, recvbuf, buffer_size - 1, 0);
+    if (nameBytes <= 0)
+    {
+        std::cout << "Client disconnected before sending name" << std::endl;
+        client->connected = false;
+        closesocket(client->clientSocket);
+        removeClient(client->clientID);
+        return;
+    }
+
+    recvbuf[nameBytes] = '\0';
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex);
+        client->name = std::string(recvbuf);
+    }
+
+    std::cout << "[Server] " << client->name << " has joined the chat!" << std::endl;
+    broadcastMessage("[Server] " + client->name + " has joined the chat!'\n'");
+    sendToSocket(client->clientSocket, "[Server] Welcome, " + client->name + "!\n");
+
+    // main recieve loop
+    while (client->connected)
+    {
+        int bytesRecieved = recv(client->clientSocket, recvbuf, buffer_size - 1, 0);
+
+        if (bytesRecieved > 0)
+        {
+            recvbuf[bytesRecieved] = '\0';
+            std::string message(recvbuf);
+
+            // client wants to exit
+            if (message == "/exit")
+            {
+                std::cout << "[Server] " << client->name << " has left the chat" << std::endl;
+                broadcastMessage("[Server] " + client->name + " has left the chat\n", client->clientID);
+                break;
+            }
+            // client whisper
+            else if (message.rfind("/w ", 0) == 0)
+            {
+                size_t firstSpace = message.find(' ', 3);
+                if (firstSpace != std::string::npos)
+                {
+                    std::string targetName = message.substr(3, firstSpace - 3);
+                    std::string whisperMsg = message.substr(firstSpace + 1);
+
+                    std::lock_guard<std::mutex> lock(clientsMutex);
+                    clientInfo* targetClient = findClientByName(targetName);
+                    if (targetClient != nullptr)
+                    {
+                        sendToSocket(targetClient->clientSocket, "[Whisper from " + client->name + "] " + whisperMsg + "\n");
+                        sendToSocket(client->clientSocket, "[Whisper to " + targetName + "] " + whisperMsg + "\n");
+                    }
+                    else
+                    {
+                        sendToSocket(client->clientSocket, "[Server] User '" + targetName + "' not found\n");
+                    }
+                }
+                else
+                {
+                    sendToSocket(client->clientSocket, "[Server] Usage: /w [username] [message]\n");
+                }
+            }
+            // Normal message to broadcast to everyone
+            else
+            {
+                std::string formatted = client->name + ": " + message + "\n";
+                std::cout << formatted;
+                broadcastMessage(formatted, client->clientID);
+            }
+        }
+        else if (bytesRecieved == 0)
+        {
+            std::cout << "[Server] recv failed for " << client->name << ": " << WSAGetLastError() << std::endl;
+            break;
+        }
+    }
+
+    // Cleanup
+    client->connected = false;
+    closesocket(client->clientSocket);
+    removeClient(client->clientID);
+}
+
+// Server input handler for global messages, whispers and user kicking
+void serverInputHandler()
+{
+    std::string input;
     while (true)
     {
-        int bytesReceived = recv(clientSocket, recvbuf, sizeof(recvbuf), 0);
+        std::getline(std::cin, input);
+        if (input.empty()) continue;
 
-        if (bytesReceived > 0)
+        // /kick username
+        if (input.rfind("/kick", 0) == 0)
         {
-            recvbuf[bytesReceived] = '\0';
-            std::cout << "Recieved from client: " << recvbuf << std::endl;
+            std::string targetClient = input.substr(6);
+            std::lock_guard<std::mutex> lock(clientsMutex);
+            clientInfo* client = findClientByName(targetClient);
+            if (client != nullptr)
+            {
+                sendToSocket(client->clientSocket, "[Server] You have been kicked from the chat\n");
+                std::cout << "[Server] Kicked: " << targetClient << std::endl;
+                broadcastMessage("[Server] " + targetClient + " has been kicked from the chat\n", client->clientID);
+                client->connected = false;
+                shutdown(client->clientSocket, SD_BOTH);
+                closesocket(client->clientSocket);
+            }
+            else
+            {
+                std::cout << "[Server] User '" << targetClient << "' not found" << std::endl;
+            }
         }
-        else if (bytesReceived == 0)
+        else if (input.rfind("/w ", 0) == 0)
         {
-            std::cout << "Client Disconnected!" << std::endl;
-            break;
+            size_t firstSpace = input.find(' ', 3);
+            if (firstSpace != std::string::npos)
+            {
+                std::string targetName = input.substr(3, firstSpace - 3);
+                std::string whisperMsg = input.substr(firstSpace + 1);
+
+                std::lock_guard<std::mutex> lock(clientsMutex);
+                clientInfo* targetClient = findClientByName(targetName);
+                if (targetClient != nullptr)
+                {
+                    sendToSocket(targetClient->clientSocket, "[Whisper from Server] " + whisperMsg + "\n");
+                    std::cout << "[Whisper to " << targetName << "] " << whisperMsg << std::endl;
+                }
+                else
+                {
+                    std::cout << "[Server] User '" << targetName << "' not found." << std::endl;
+                }
+            }
+            else
+            {
+                std::cout << "[Server] Usage: /w <username> <message>" << std::endl;
+            }
         }
+        else if (input.rfind("/list", 0) == 0)
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex);
+            std::cout << "Connected clients: (" << clients.size() << "/" << maxClients << "):" << std::endl;
+            for (auto& client : clients)
+            {
+                std::cout << "  - " << client->name << " (ID: " << client->clientID << ")" << std::endl;
+            }
+        }
+        // Global broadcast
         else
         {
-            std::cerr << "Recv failed:" << WSAGetLastError() << std::endl;
-            break;
+            std::string formatted = "[Server] " + input + "\n";
+            std::cout << formatted;
+            broadcastMessage(formatted);
         }
     }
 }
@@ -95,76 +251,91 @@ int main()
         std::cerr << "WSAStartup Failed: " << result << std::endl;
         return 1;
     }
-    std::cout << "Winsock startup successful!" << std::endl;
+    std::cout << "[Server] Winsock startup successful!" << std::endl;
 
     // Create a TCP Socket
-    SOCKET sock = INVALID_SOCKET;
-    int iFamily = AF_INET;
-    int iType = SOCK_STREAM;
-    int iProtocol = IPPROTO_TCP;
-
-    sock = socket(iFamily, iType, iProtocol);
-    if (sock == INVALID_SOCKET)
+    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listenSocket == INVALID_SOCKET)
     {
-        std::cerr << "Socket function called with error: " << WSAGetLastError() << std::endl;
+        std::cerr << "Socket creation failed: " << WSAGetLastError() << std::endl;
+        WSACleanup();
         return 1;
     }
-    std::cout << "Socket function succeeded!" << std::endl;
+
 
     // The sockaddr_in structure specifies the address family,
     // IP address, and port for the socket that is being bound.
-    sockaddr_in service;
+    sockaddr_in service{};
     service.sin_family = AF_INET;
     service.sin_addr.S_un.S_addr = inet_addr("127.0.0.1");
     service.sin_port = htons(55555);
 
     // Bind the TCP socket with the address info
-    int bind_result = bind(sock, (SOCKADDR*)&service, sizeof(service));
-    if (bind_result == SOCKET_ERROR)
+    if (bind(listenSocket, (SOCKADDR*)&service, sizeof(service)) == SOCKET_ERROR)
     {
         std::cerr << "Socket bind failed! " << WSAGetLastError() << std::endl;
+        closesocket(listenSocket);
+        WSACleanup();
+        return 1;
     }
-    std::cout << "Socket bind succeeded!" << std::endl;
-
-    // Set the socket to a listening state
-    if (listen(sock, 1) == SOCKET_ERROR)
+    
+    if (listen(listenSocket, maxClients) == SOCKET_ERROR)
     {
-        std::cerr << "Listen function failed with error: " << WSAGetLastError() << std::endl;
-    }
-    std::cout << "Socket is listening" << std::endl;
-
-    // Create a socket to accept incoming connections
-    SOCKET acceptSocket;
-    std::cout << "Waiting for client to connect..." << std::endl;
-
-    // Accept the connection and add socket to client vector
-    acceptSocket = accept(sock, nullptr, nullptr);
-    if (acceptSocket == INVALID_SOCKET)
-    {
-        std::cerr << "Failed to accept client connection: " << WSAGetLastError() << std::endl;
-        closesocket(acceptSocket);
+        std::cerr << "Listen failed: " << WSAGetLastError() << std::endl;
+        closesocket(listenSocket);
         WSACleanup();
         return 1;
     }
 
-    std::cout << "Connection to client established" << std::endl;
+    std::cout << "[Server] Listening on port 55555..." << std::endl;
 
-    clientID++;
-    std::thread t(clientHandler, acceptSocket, clientID);
-    std::lock_guard<std::mutex> guard(clientsMutex);
-    std::string randomName = "random";
-    clients.push_back({ clientID, randomName, acceptSocket, std::move(t) });
+    // start the server input thread
+    std::thread inputThread(serverInputHandler);
+    inputThread.detach();
 
-    for (int i = 0; i < clients.size(); ++i)
+    // Accept loop
+    while (true)
     {
-        if (clients[i].clientThread.joinable())
+        SOCKET acceptSocket = accept(listenSocket, nullptr, nullptr);
+        if (acceptSocket == INVALID_SOCKET)
         {
-            clients[i].clientThread.join();
+            std::cerr << "Accept failed: " << WSAGetLastError() << std::endl;
+            continue;
         }
+        
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex);
+            if ((int)clients.size() >= maxClients)
+            {
+                std::string full = "[Server] Server is full. Try again later \n";
+                send(acceptSocket, full.c_str(), (int)full.size(), 0);
+                closesocket(acceptSocket);
+                std::cout << "[Server] Rejected connection (server full)" << std::endl;
+                continue;
+            }
+        }
+
+        nextClientID++;
+        clientInfo* newClient = new clientInfo();
+        newClient->clientID = nextClientID;
+        newClient->name = "Unknown User";
+        newClient->clientSocket = acceptSocket;
+        newClient->connected = true;
+
+        // Start the handler thread, add client to clients vector
+        newClient->clientThread = std::thread(clientHandler, newClient);
+        newClient->clientThread.detach();
+
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex);
+            clients.push_back(newClient);
+        }
+
+        std::cout << "[Server] New connection accepted (ID: " << newClient->clientID << ")" << std::endl;
     }
 
-    closesocket(acceptSocket);
-
+    closesocket(listenSocket);
     WSACleanup();
+    return 0;
 
 }
