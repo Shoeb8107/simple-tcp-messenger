@@ -13,7 +13,7 @@
 #pragma comment(lib, "Ws2_32.lib")
 #pragma warning(disable:4996)
 
-namespace GLOBALS
+namespace
 {
     std::chrono::seconds timespan(1);
     constexpr int buffer_size = 512;
@@ -24,22 +24,22 @@ namespace GLOBALS
 // User can exit using CTRL+C
 void handleExit(int signal)
 {
-    GLOBALS::running = false;
+    running = false;
     return;
 }
 
 void sendMessage(SOCKET clientSocket)
 {
-    while (GLOBALS::running)
+    while (running)
     {
         std::cout << "You: ";
-        char msg[GLOBALS::buffer_size];
-        std::cin.getline(msg, GLOBALS::buffer_size);
-        if (std::cin.fail() || GLOBALS::running == false) { break; }
+        char msg[buffer_size];
+        std::cin.getline(msg, buffer_size);
+        if (std::cin.fail() || running == false) { break; }
         send(clientSocket, msg, strlen(msg), 0);
         if (strstr(msg, "/exit"))
         {
-            GLOBALS::running = false;
+            running = false;
             // we need to handle the exit gracefully here. Maybe use the handleExit()?
         }
 
@@ -48,29 +48,26 @@ void sendMessage(SOCKET clientSocket)
 
 void recieveMessage(SOCKET clientSocket)
 {
-    char buf[GLOBALS::buffer_size];
-    while (GLOBALS::running)
+    char buf[buffer_size];
+    while (running)
     {
-        int recv_result = recv(clientSocket, buf, GLOBALS::buffer_size-1, 0);
+        int recv_result = recv(clientSocket, buf, buffer_size-1, 0);
         if (recv_result > 0)
         {
             buf[recv_result] = '\0';
             std::cout << "Message received: " << buf << std::endl;
-
-            const char* reply = "Hello from Client!";
-            send(clientSocket, reply, strlen(reply), 0);
         }
         else if (recv_result == 0)
         {
             std::cout << "Connection closed!" << std::endl;
-            GLOBALS::running = false;
+            running = false;
             break;
 
         }
         else
         {
             std::cerr << "Attempting to receive message failed: " << WSAGetLastError() << std::endl;
-            GLOBALS::running = false;
+            running = false;
             break;
             // Might also need an fflush(stdout)
         }
@@ -96,14 +93,14 @@ int main()
     int iType = SOCK_STREAM;
     int iProtocol = IPPROTO_TCP;
 
-    GLOBALS::clientSocket = socket(iFamily, iType, iProtocol);
-    if (GLOBALS::clientSocket == INVALID_SOCKET)
+    clientSocket = socket(iFamily, iType, iProtocol);
+    if (clientSocket == INVALID_SOCKET)
     {
         std::cerr << "Socket function called with error: " << WSAGetLastError() << std::endl;
         WSACleanup();
         return 1;
     }
-    std::this_thread::sleep_for(GLOBALS::timespan);
+    std::this_thread::sleep_for(timespan);
     std::cout << "Socket function succeeded!" << std::endl;
 
     sockaddr_in clientService;
@@ -111,27 +108,33 @@ int main()
     clientService.sin_addr.S_un.S_addr = inet_addr("127.0.0.1");
     clientService.sin_port = htons(55555);
 
-    int connect_result = connect(GLOBALS::clientSocket, (SOCKADDR*)&clientService, sizeof clientService);
+    int connect_result = connect(clientSocket, (SOCKADDR*)&clientService, sizeof clientService);
     if (connect_result == SOCKET_ERROR)
     {
         std::cerr << "Connection to host failed: " << WSAGetLastError() << std::endl;
         WSACleanup();
         return 1;
     }
-    GLOBALS::running = true;
+    running = true;
     std::cout << "Connected to host!" << std::endl;
     // Think about SetConsoleCtrlHandler() instead of signal()
     signal(SIGINT, handleExit);
 
+    // Enter name
+    char name[buffer_size];
+    std::cout << "Enter your username: ";
+    std::cin.getline(name, buffer_size);
+    send(clientSocket, name, sizeof(name), 0);
+
     //Create separate threads for sending and recieving messages
-    std::thread sendThread(sendMessage, GLOBALS::clientSocket);
-    std::thread recieveThread(recieveMessage, GLOBALS::clientSocket);
+    std::thread sendThread(sendMessage, clientSocket);
+    std::thread recieveThread(recieveMessage, clientSocket);
 
     if (sendThread.joinable()) sendThread.join();
-    shutdown(GLOBALS::clientSocket, SD_BOTH);
+    shutdown(clientSocket, SD_BOTH);
     if (recieveThread.joinable()) recieveThread.join();
 
-    closesocket(GLOBALS::clientSocket);
+    closesocket(clientSocket);
     WSACleanup();
 
 }

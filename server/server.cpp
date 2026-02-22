@@ -40,29 +40,31 @@ void setClientName(UINT clientID, char name[])
 
 void clientHandler(SOCKET clientSocket, UINT clientID)
 {
-    std::cout << "Client Connected!" << std::endl;
-    std::cout << "Sending welcome message..." << std::endl;
-    // Send some data to client
-    const char* buf = "Hello from Server!";
-    int sentData = send(clientSocket, buf, strlen(buf), 0);
-    if (sentData == SOCKET_ERROR)
-    {
-        std::cerr << "Failed to send message to client: " << WSAGetLastError() << std::endl;
-        return;
-
-    }
-
     char name[buffer_size];
     char msg[buffer_size];
     recv(clientSocket, name, strlen(name), 0);
     setClientName(clientID, name);
+
+    std::cout << "Welcome "<< name << " !" << std::endl;
+    // Send some data to client
+    //const char* buf = "Hello from Server!";
+    //int sentData = send(clientSocket, buf, strlen(buf), 0);
+    //if (sentData == SOCKET_ERROR)
+    //{
+    //    std::cerr << "Failed to send message to client: " << WSAGetLastError() << std::endl;
+    //    return;
+
+    //}
+    //std::cout << "Message sent!" << std::endl;
+
+
 
 
     // Keep listening for client response
     char recvbuf[buffer_size];
     while (true)
     {
-        int bytesReceived = recv(clientSocket, recvbuf, strlen(recvbuf), 0);
+        int bytesReceived = recv(clientSocket, recvbuf, sizeof(recvbuf), 0);
 
         if (bytesReceived > 0)
         {
@@ -144,6 +146,8 @@ int main()
         WSACleanup();
         return 1;
     }
+
+    std::cout << "Connection to client established" << std::endl;
 
     clientID++;
     std::thread t(clientHandler, acceptSocket, clientID);
